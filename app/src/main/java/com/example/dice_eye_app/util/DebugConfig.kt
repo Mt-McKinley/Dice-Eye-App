@@ -19,6 +19,16 @@ object DebugConfig {
     const val LOG_CLASSIFIER_DETAILS = true // Log detailed classification probabilities
     const val LOG_ALL_DETECTIONS = true     // Log all detections before filtering
 
+    // Mapping diagnostics
+    // If true, bypasses ClassMapping so the app uses raw class ids (0..5) directly.
+    // This helps isolate whether wrong outputs are due to mapping or preprocessing.
+    const val BYPASS_CLASS_MAPPING = false
+
+    // Bitmapping diagnostics
+    // If true, swap red and blue channels during classifier preprocessing to test
+    // BGR vs RGB mismatches.
+    const val SWAP_RB_CHANNELS = false
+
     // Path for saving debug images
     const val DEBUG_PATH = "DiceEyeApp/debug"  // Subdirectory under Pictures for debug images
 }

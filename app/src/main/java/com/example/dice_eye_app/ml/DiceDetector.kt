@@ -4,7 +4,6 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.Paint
 import android.graphics.RectF
 import android.util.Log
 import com.example.dice_eye_app.util.DebugBitmap
@@ -16,6 +15,8 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.MappedByteBuffer
 import java.nio.channels.FileChannel
+import java.util.Locale
+import java.nio.FloatBuffer
 
 /**
  * Detects the location of dice in a given bitmap image using a YOLO-based TFLite model.
@@ -57,6 +58,9 @@ class DiceDetector(private val context: Context) {
     private var modelInputHeight = 0
     private var modelInputChannels = 0
     private var modelInputType: DataType = DataType.UINT8
+    // Quantization parameters for INT8/UINT8 inputs when available
+    private var inputScale: Float = 1.0f
+    private var inputZeroPoint: Int = 0
 
     // Pre-processing values, stored to correctly transform bounding boxes back to original image coordinates.
     private var lastScaleFactor: Float = 1f
@@ -80,15 +84,23 @@ class DiceDetector(private val context: Context) {
         }
 
         try {
+            val interp = interpreter!!
             // Step 1: Pre-process the image to match the model's input requirements.
             val inputBuffer = preprocessImage(bitmap)
 
-            // Step 2: Prepare model outputs and run inference.
-            val outputs = prepareOutputs()
-            interpreter!!.runForMultipleInputsOutputs(arrayOf(inputBuffer), outputs)
+            // Step 2: Prepare model outputs dynamically and run inference.
+            var outputs: MutableMap<Int, Any> = allocateOutputs(interp)
+            try {
+                interp.runForMultipleInputsOutputs(arrayOf(inputBuffer), outputs)
+            } catch (iae: IllegalArgumentException) {
+                // Handle shape mismatches by retrying with flat arrays.
+                Log.w(TAG, "TFLite output shape mismatch: ${iae.message}. Retrying with flat output buffers...")
+                outputs = allocateFlatOutputs(interp)
+                interp.runForMultipleInputsOutputs(arrayOf(inputBuffer), outputs)
+            }
 
             // Step 3: Post-process the raw model output to get meaningful detections.
-            return postprocess(outputs, bitmap.width, bitmap.height)
+            return postprocess(outputs, bitmap, interp)
 
         } catch (e: Exception) {
             Log.e(TAG, "An error occurred during dice detection.", e)
@@ -132,6 +144,12 @@ class DiceDetector(private val context: Context) {
         val inputShape = inputTensor.shape()
         modelInputType = inputTensor.dataType()
         Log.d(TAG, "Input: shape=${inputShape.contentToString()}, type=$modelInputType")
+        try {
+            val q = inputTensor.quantizationParams()
+            inputScale = q.scale
+            inputZeroPoint = q.zeroPoint
+            Log.d(TAG, "Input quantization: scale=${inputScale}, zeroPoint=${inputZeroPoint}")
+        } catch (_: Throwable) { /* quantization may be unavailable */ }
 
         // Assuming NHWC format [Batch, Height, Width, Channels].
         if (inputShape.size == 4) {
@@ -152,11 +170,11 @@ class DiceDetector(private val context: Context) {
     /**
      * Prepares the image for inference: resizes, pads to a square, and converts to a ByteBuffer.
      */
-    private fun preprocessImage(bitmap: Bitmap): ByteBuffer {
+    private fun preprocessImage(bitmap: Bitmap): Any {
         // Calculate scaling factor and padding to create a letterboxed image.
         val scale = minOf(modelInputWidth / bitmap.width.toFloat(), modelInputHeight / bitmap.height.toFloat())
-        val newW = (bitmap.width * scale).toInt()
-        val newH = (bitmap.height * scale).toInt()
+        val newW = (bitmap.width * scale).toInt().coerceAtLeast(1)
+        val newH = (bitmap.height * scale).toInt().coerceAtLeast(1)
         val padX = (modelInputWidth - newW) / 2f
         val padY = (modelInputHeight - newH) / 2f
 
@@ -172,93 +190,260 @@ class DiceDetector(private val context: Context) {
         canvas.drawBitmap(resizedBitmap, padX, padY, null)
 
         if (DebugConfig.SAVE_LETTERBOXED) {
-            DebugBitmap.save(context, letterboxedBitmap, "detector_input")
+            DebugBitmap.saveBitmap(context, letterboxedBitmap, "detector_input")
         }
 
         val pixels = IntArray(modelInputWidth * modelInputHeight)
         letterboxedBitmap.getPixels(pixels, 0, modelInputWidth, 0, 0, modelInputWidth, modelInputHeight)
 
-        // Create a ByteBuffer matching the model's expected input type (UINT8).
-        val buffer = ByteBuffer.allocateDirect(modelInputWidth * modelInputHeight * modelInputChannels)
-        buffer.order(ByteOrder.nativeOrder())
-        for (pixelValue in pixels) {
-            buffer.put(((pixelValue shr 16) and 0xFF).toByte()) // R
-            buffer.put(((pixelValue shr 8) and 0xFF).toByte())  // G
-            buffer.put((pixelValue and 0xFF).toByte())          // B
+        return when (modelInputType) {
+            DataType.FLOAT32 -> {
+                val floatBuffer = ByteBuffer.allocateDirect(4 * modelInputWidth * modelInputHeight * modelInputChannels)
+                    .order(ByteOrder.nativeOrder())
+                    .asFloatBuffer()
+                // Normalize to 0..1 floats
+                for (pixel in pixels) {
+                    val r = ((pixel shr 16) and 0xFF) / 255f
+                    val g = ((pixel shr 8) and 0xFF) / 255f
+                    val b = (pixel and 0xFF) / 255f
+                    floatBuffer.put(r); floatBuffer.put(g); floatBuffer.put(b)
+                }
+                floatBuffer.rewind()
+                floatBuffer
+            }
+            DataType.INT8 -> {
+                // Signed int8: quantize normalized [0,1] via scale/zeroPoint
+                val byteBuffer = ByteBuffer.allocateDirect(modelInputWidth * modelInputHeight * modelInputChannels)
+                byteBuffer.order(ByteOrder.nativeOrder())
+                fun q(v: Float): Byte {
+                    val quant = Math.round(v / inputScale + inputZeroPoint).coerceIn(-128, 127)
+                    return quant.toByte()
+                }
+                for (pixel in pixels) {
+                    val r = ((pixel shr 16) and 0xFF) / 255f
+                    val g = ((pixel shr 8) and 0xFF) / 255f
+                    val b = (pixel and 0xFF) / 255f
+                    byteBuffer.put(q(r)); byteBuffer.put(q(g)); byteBuffer.put(q(b))
+                }
+                byteBuffer.rewind()
+                byteBuffer
+            }
+            DataType.UINT8 -> {
+                // Unsigned bytes 0..255
+                val buffer = ByteBuffer.allocateDirect(modelInputWidth * modelInputHeight * modelInputChannels)
+                buffer.order(ByteOrder.nativeOrder())
+                for (pixelValue in pixels) {
+                    buffer.put(((pixelValue shr 16) and 0xFF).toByte()) // R
+                    buffer.put(((pixelValue shr 8) and 0xFF).toByte())  // G
+                    buffer.put((pixelValue and 0xFF).toByte())          // B
+                }
+                buffer.rewind()
+                buffer
+            }
+            else -> {
+                // Fallback: float32
+                val floatBuffer = ByteBuffer.allocateDirect(4 * modelInputWidth * modelInputHeight * modelInputChannels)
+                    .order(ByteOrder.nativeOrder())
+                    .asFloatBuffer()
+                for (pixel in pixels) {
+                    val r = ((pixel shr 16) and 0xFF) / 255f
+                    val g = ((pixel shr 8) and 0xFF) / 255f
+                    val b = (pixel and 0xFF) / 255f
+                    floatBuffer.put(r); floatBuffer.put(g); floatBuffer.put(b)
+                }
+                floatBuffer.rewind()
+                floatBuffer
+            }
         }
-        return buffer.apply { rewind() }
     }
 
     /**
-     * Allocates a map of buffers to receive the model's output.
-     * The YOLO model is expected to have 4 outputs: boxes, scores, classes, and number of detections.
+     * Build an outputs map matching the actual output tensor shapes of the model.
+     * Supports common detection heads with separate boxes/scores/classes/num.
      */
-    private fun prepareOutputs(): Map<Int, Any> {
-        // The model is expected to output a maximum of 25 detections.
-        val maxDetections = 25
-        return mapOf(
-            // Output 0: Bounding boxes [1, 25, 4]
-            0 to Array(1) { Array(maxDetections) { FloatArray(4) } },
-            // Output 1: Scores [1, 25]
-            1 to Array(1) { FloatArray(maxDetections) },
-            // Output 2: Classes [1, 25]
-            2 to Array(1) { FloatArray(maxDetections) },
-            // Output 3: Number of detections [1]
-            3 to FloatArray(1)
-        )
+    private fun allocateOutputs(interp: Interpreter): MutableMap<Int, Any> {
+        val map = mutableMapOf<Int, Any>()
+        for (i in 0 until interp.outputTensorCount) {
+            val t = interp.getOutputTensor(i)
+            val shape = t.shape()
+            // Allocate containers according to rank
+            when (shape.size) {
+                3 -> {
+                    // e.g., [1, N, 4] for boxes
+                    val n = shape[1]
+                    val m = shape[2]
+                    map[i] = Array(1) { Array(n) { FloatArray(m) } }
+                }
+                2 -> {
+                    // e.g., [1, N] for scores or classes
+                    val n = shape[1]
+                    map[i] = Array(1) { FloatArray(n) }
+                }
+                1 -> {
+                    // e.g., [1] for numDetections
+                    map[i] = FloatArray(1)
+                }
+                else -> {
+                    // Fallback: allocate a flat float array of total size (rare)
+                    val total = shape.fold(1) { acc, v -> acc * v }
+                    map[i] = FloatArray(total)
+                    Log.w(TAG, "Unknown output rank ${shape.size} for tensor $i, allocating flat array of $total floats")
+                }
+            }
+        }
+        return map
+    }
+
+    // Allocate flat buffers for every output tensor. Useful as a fallback when shapes are tricky.
+    private fun allocateFlatOutputs(interp: Interpreter): MutableMap<Int, Any> {
+        val map = mutableMapOf<Int, Any>()
+        for (i in 0 until interp.outputTensorCount) {
+            val t = interp.getOutputTensor(i)
+            val shape = t.shape()
+            val total = shape.fold(1) { acc, v -> acc * v }
+            map[i] = FloatArray(total)
+        }
+        return map
     }
 
     /**
-     * Processes the raw output from the TFLite model into a clean list of [Detection] objects.
+     * Processes the raw outputs into a list of Detection objects. This method is tolerant
+     * to different output tensor orders; it will identify boxes/scores/classes by shape.
      */
-    private fun postprocess(outputs: Map<Int, Any>, originalWidth: Int, originalHeight: Int): List<Detection> {
-        // Extract data from the output map.
-        val boxes = (outputs[0] as Array<Array<FloatArray>>)[0]
-        val scores = (outputs[1] as Array<FloatArray>)[0]
-        // Classes are ignored here, as this model only detects a single "die" class.
-        val numDetections = (outputs[3] as FloatArray)[0].toInt()
+    private fun postprocess(outputs: Map<Int, Any>, originalBitmap: Bitmap, interp: Interpreter): List<Detection> {
+        // Identify candidates
+        var boxes: Array<Array<FloatArray>>? = null
+        val candidates1xN = mutableListOf<FloatArray>()
+        var numDetections: Int? = null
+
+        for ((index, o) in outputs) {
+            val shape = interp.getOutputTensor(index).shape()
+
+            // Handle flat outputs by reshaping according to tensor shape
+            if (o is FloatArray) {
+                when (shape.size) {
+                    3 -> {
+                        val n = shape[1]
+                        val m = shape[2]
+                        if (m == 4) {
+                            val arr = Array(1) { Array(n) { FloatArray(m) } }
+                            var k = 0
+                            for (i in 0 until 1) {
+                                for (j in 0 until n) {
+                                    for (p in 0 until m) {
+                                        arr[i][j][p] = o[k++]
+                                    }
+                                }
+                            }
+                            boxes = arr
+                            continue
+                        }
+                    }
+                    2 -> {
+                        val n = shape[1]
+                        candidates1xN.add(o.copyOfRange(0, n))
+                        continue
+                    }
+                    1 -> {
+                        numDetections = o[0].toInt()
+                        continue
+                    }
+                }
+            }
+
+            // Boxes: Array(1){ Array(N){ FloatArray(M) } } where M==4
+            val arr3 = o as? Array<*>
+            if (arr3 != null && arr3.size == 1) {
+                val inner = arr3[0] as? Array<*>
+                if (inner != null && inner.isNotEmpty()) {
+                    val first = inner[0]
+                    if (first is FloatArray && first.size == 4) {
+                        @Suppress("UNCHECKED_CAST")
+                        boxes = arr3 as Array<Array<FloatArray>>
+                        continue
+                    }
+                }
+                // Scores/classes: Array(1){ FloatArray(N) }
+                val as1xN = arr3 as? Array<FloatArray>
+                if (as1xN != null && as1xN.size == 1) {
+                    candidates1xN.add(as1xN[0])
+                    continue
+                }
+            }
+            // num detections: FloatArray(1)
+            val fa = o as? FloatArray
+            if (fa != null && fa.size == 1) {
+                numDetections = fa[0].toInt()
+            }
+        }
+
+        if (boxes == null) {
+            Log.e(TAG, "Postprocess: No boxes tensor (1xNx4) found in model outputs.")
+            return emptyList()
+        }
+
+        val boxArr = boxes!![0]
+        val n = boxArr.size
+
+        // Choose scores among 1xN candidates by picking the one that looks like 0..1 probabilities
+        var scores: FloatArray? = null
+        if (candidates1xN.isNotEmpty()) {
+            scores = candidates1xN.maxByOrNull { arr ->
+                // Heuristic: prefer arrays whose values are within [0,1] and have higher mean
+                val mean = arr.average().toFloat()
+                val clampScore = arr.count { it in 0f..1f }
+                mean + clampScore / (arr.size + 1f)
+            }
+        }
+
+        // If numDetections missing, assume all boxes are valid candidates (N)
+        val count = numDetections?.coerceIn(0, n) ?: n
 
         val detections = mutableListOf<Detection>()
+        val originalWidth = originalBitmap.width
+        val originalHeight = originalBitmap.height
         val imageArea = (originalWidth * originalHeight).toFloat()
 
-        for (i in 0 until numDetections) {
-            val score = scores[i]
-            if (score < Config.CONFIDENCE_THRESHOLD) continue
-
-            val box = boxes[i]
+        for (i in 0 until count) {
+            val box = boxArr[i]
+            if (box.size < 4) continue
             val y1 = box[0]
             val x1 = box[1]
             val y2 = box[2]
             val x2 = box[3]
+
+            val score = scores?.getOrNull(i) ?: 1.0f
+            if (score < Config.CONFIDENCE_THRESHOLD) continue
 
             // Convert normalized, letterboxed coordinates back to original image coordinates.
             val rect = denormalizeAndUnpad(x1, y1, x2, y2, originalWidth, originalHeight)
 
             // Apply sanity filters to the bounding box.
             if (!isValid(rect, imageArea)) {
-                Log.d(TAG, "Detection $i discarded by sanity filters.")
+                if (DebugConfig.LOG_ALL_DETECTIONS) {
+                    Log.d(TAG, "Detection $i discarded by sanity filters.")
+                }
                 continue
             }
 
-            detections.add(
-                Detection(
-                    boundingBox = rect,
-                    confidence = score
-                )
-            )
+            detections.add(Detection(boundingBox = rect, confidence = score))
         }
         Log.d(TAG, "${detections.size} detections passed confidence and sanity checks.")
 
-        // Apply Non-Maximum Suppression (NMS) to remove overlapping boxes for the same object.
+        // Briefly log up to 3 raw detections for diagnostics
+        for (i in 0 until minOf(3, detections.size)) {
+            val d = detections[i]
+            Log.d(TAG, String.format(Locale.US, "Det[%d]: conf=%.3f box=[%.1f,%.1f,%.1f,%.1f]", i, d.confidence, d.boundingBox.left, d.boundingBox.top, d.boundingBox.right, d.boundingBox.bottom))
+        }
+
+        // Apply NMS
         val finalDetections = applyNMS(detections)
 
         if (DebugConfig.SAVE_DETECTIONS_OVERLAY) {
-            val labeled = finalDetections.map { it.boundingBox to "Die (${"%.2f".format(it.confidence)})" }
-            val originalBitmap = DebugBitmap.getOriginalBitmap() // Assumes a debug utility to fetch the original bitmap
-            originalBitmap?.let {
-                val overlay = DebugBitmap.drawOverlay(it, labeled)
-                DebugBitmap.save(context, overlay, "detector_final_detections")
-            }
+            val labels = finalDetections.map { it.boundingBox to "Die (${String.format(Locale.US, "%.2f", it.confidence)})" }
+            val overlay = DebugBitmap.drawOverlayLabeled(originalBitmap, labels)
+            DebugBitmap.saveBitmap(context, overlay, "detector_final_detections")
+            overlay.recycle()
         }
 
         return finalDetections

@@ -18,27 +18,25 @@ class TwoStepDiceDetector(private val context: Context) {
     private val detector = DiceDetector(context)
     private val classifier = DiceClassifier(context)
 
-    // FINAL, CORRECTED MAPPING: Based on the alphabetical order of the training data folders.
-    // The model's labels are ordered alphabetically: five, four, one, six, three, two.
-    // This remaps the model's output index to the correct face value index (0-5 for faces 1-6).
-    private val classRemap: IntArray = intArrayOf(4, 3, 0, 5, 2, 1)
-
-    // Explanation of the correct mapping:
-    // Model Index -> Folder -> Face Value -> Final App Index (0-5)
-    // -----------------------------------------------------------
-    // 0 -> five   -> 5 -> 4
-    // 1 -> four   -> 4 -> 3
-    // 2 -> one    -> 1 -> 0
-    // 3 -> six    -> 6 -> 5
-    // 4 -> three  -> 3 -> 2
-    // 5 -> two    -> 2 -> 1
-
     // Filtering thresholds have been relaxed to avoid incorrectly discarding valid dice.
     private val minClassificationConfidence = 0.25f
     private val minCombinedConfidence = 0.05f
-    private val minTop1Margin = 0.02f
+    // Tighten top-1 margin to avoid ambiguous/wrong classes
+    private val minTop1Margin = 0.20f
     private val finalNmsIou = 0.40f
     private val maxFinalDetections = 10
+
+    init {
+        // Load labels order and compute mapping based on assets file to avoid miscommunication
+        ClassMapping.initialize(context, expectedClasses = 6)
+        // Log and validate the central mapping once at startup
+        ClassMapping.logMapping()
+        if (!ClassMapping.isValid()) {
+            Log.e(TAG, "ClassMapping is invalid – check labels file and mapping table!")
+        }
+        // Emit a comprehensive model health report once on startup
+        TFLiteDiagnostics.runModelHealth(context)
+    }
 
     /**
      * Detect and classify all dice in the image
@@ -47,7 +45,7 @@ class TwoStepDiceDetector(private val context: Context) {
      */
     fun detectAndClassify(bitmap: Bitmap): List<ClassifiedDetection> {
         // Step 1: Detect dice locations
-        val detections = detector.detectDice(bitmap)
+        val detections = detector.detect(bitmap)
         Log.d(TAG, "Step 1: Found ${detections.size} dice")
 
         if (detections.isEmpty()) return emptyList()
@@ -79,36 +77,36 @@ class TwoStepDiceDetector(private val context: Context) {
                             Log.e(TAG, "Raw class ID: ${classification.classId}")
                             Log.e(TAG, "Top-1 margin: ${"%.4f".format(margin)}")
 
-                            // Log the remapping table for clarity
-                            Log.e(TAG, "Class remapping table:")
-                            for (i in 0..5) {
-                                Log.e(TAG, "  Model class $i -> Face ${classRemap[i] + 1}")
+                            // Log the remapping table for clarity (from central ClassMapping)
+                            Log.e(TAG, "Class remapping table (model -> app face):")
+                            ClassMapping.mapping.forEachIndexed { i, to ->
+                                Log.e(TAG, "  Model class $i -> Face ${to + 1}")
                             }
 
                             // Show the actual remapping that will occur
-                            val mappedId = classification.classId.let { raw ->
-                                if (raw in 0..5) classRemap[raw] else raw
-                            }
-                            Log.e(TAG, "After remapping: ${classification.classId} -> $mappedId (Face ${mappedId + 1})")
+                            val raw = classification.classId
+                            val mappedId = if (DebugConfig.BYPASS_CLASS_MAPPING) raw else ClassMapping.map(raw).let { if (it >= 0) it else raw }
+                            val note = if (DebugConfig.BYPASS_CLASS_MAPPING) "(BYPASS)" else ""
+                            Log.e(TAG, "After remapping$note: ${raw} -> $mappedId (Face ${mappedId + 1})")
                             Log.e(TAG, "===========================================")
                         }
 
                         if (margin < minTop1Margin) {
                             Log.d(TAG, "Discarding ambiguous classification (margin=${"%.3f".format(margin)}) for die ${index + 1}")
                         } else {
-                            val mappedId = classification.classId.let { raw ->
-                                if (raw in 0..5) classRemap[raw] else raw
-                            }
+                            val raw = classification.classId
+                            val mappedId = if (DebugConfig.BYPASS_CLASS_MAPPING) raw else ClassMapping.map(raw).let { if (it >= 0) it else raw }
                             val combined = detection.confidence * classification.confidence
                             val cd = ClassifiedDetection(
                                 boundingBox = detection.boundingBox,
                                 detectionConfidence = detection.confidence,
+                                rawClassId = raw,
                                 classId = mappedId,
                                 className = "Face ${mappedId + 1}",
                                 classificationConfidence = classification.confidence,
                                 combinedConfidence = combined
                             )
-                            Log.d(TAG, "Die ${index + 1}: RAW=${classification.classId + 1} -> MAPPED=${mappedId + 1}, Conf=${"%.3f".format(classification.confidence)}, Margin=${"%.3f".format(margin)}, Combined=${"%.3f".format(combined)})")
+                            Log.d(TAG, "Die ${index + 1}: RAW=${raw + 1} -> MAPPED=${mappedId + 1}, Conf=${"%.3f".format(classification.confidence)}, Margin=${"%.3f".format(margin)}, Combined=${"%.3f".format(combined)})")
                             classified.add(cd)
                         }
                     } else {
@@ -149,7 +147,11 @@ class TwoStepDiceDetector(private val context: Context) {
 
         if (DebugConfig.ENABLED && DebugConfig.SAVE_FINAL_OVERLAY && finalResults.isNotEmpty()) {
             val labels = finalResults.map { det ->
-                val label = "${det.classId + 1} (${"%.2f".format(det.classificationConfidence)})"
+                val label = if (DebugConfig.BYPASS_CLASS_MAPPING) {
+                    "raw ${det.rawClassId + 1} (${"%.2f".format(det.classificationConfidence)})"
+                } else {
+                    "raw ${det.rawClassId + 1} -> f${det.classId + 1} (${"%.2f".format(det.classificationConfidence)})"
+                }
                 det.boundingBox to label
             }
             val overlay = DebugBitmap.drawOverlayLabeled(bitmap, labels)
@@ -173,7 +175,7 @@ class TwoStepDiceDetector(private val context: Context) {
             val w = (right - left).coerceAtLeast(1f)
             val h = (bottom - top).coerceAtLeast(1f)
             val size = maxOf(w, h)
-            val padded = size * 1.15f // 15% padding
+            val padded = size * 1.08f // slightly reduce padding to keep die dominant
 
             var newLeft = (cx - padded / 2f)
             var newTop = (cy - padded / 2f)
@@ -230,21 +232,29 @@ class TwoStepDiceDetector(private val context: Context) {
     private fun classifyWithRotations(cropped: Bitmap): DiceClassifier.ClassificationResult? {
         val angles = intArrayOf(0, 90, 180, 270)
         val allProbs = mutableListOf<FloatArray>()
-        val bitmaps = mutableListOf<Bitmap>()
+        val temps = mutableListOf<Bitmap>()
 
         try {
             for (deg in angles) {
                 val rotated = if (deg == 0) cropped else rotateBitmap(cropped, deg.toFloat())
-                bitmaps.add(rotated)
+                if (deg != 0) temps.add(rotated)
                 if (DebugConfig.ENABLED && DebugConfig.SAVE_ROTATED_VARIANTS) {
                     DebugBitmap.saveBitmap(context, rotated, "crop_rot_${deg}")
                 }
                 classifier.classify(rotated)?.let { allProbs.add(it.allProbabilities) }
+
+                // Horizontal flip TTA
+                val flipped = flipHorizontal(rotated)
+                temps.add(flipped)
+                if (DebugConfig.ENABLED && DebugConfig.SAVE_ROTATED_VARIANTS) {
+                    DebugBitmap.saveBitmap(context, flipped, "crop_rot_${deg}_flip")
+                }
+                classifier.classify(flipped)?.let { allProbs.add(it.allProbabilities) }
             }
 
             if (allProbs.isEmpty()) return null
 
-            // Average the probabilities across all rotations
+            // Average the probabilities across all variants
             val avgProbs = FloatArray(allProbs[0].size)
             for (probs in allProbs) {
                 for (i in avgProbs.indices) {
@@ -274,9 +284,9 @@ class TwoStepDiceDetector(private val context: Context) {
             )
 
         } finally {
-            // Recycle temp rotated bitmaps
-            for (i in 1 until bitmaps.size) {
-                try { bitmaps[i].recycle() } catch (_: Exception) {}
+            // Recycle temporary rotated/flipped bitmaps (keep original cropped)
+            for (bmp in temps) {
+                try { bmp.recycle() } catch (_: Exception) {}
             }
         }
     }
@@ -284,6 +294,11 @@ class TwoStepDiceDetector(private val context: Context) {
     private fun rotateBitmap(source: Bitmap, angle: Float): Bitmap {
         val matrix = Matrix()
         matrix.postRotate(angle)
+        return Bitmap.createBitmap(source, 0, 0, source.width, source.height, matrix, true)
+    }
+
+    private fun flipHorizontal(source: Bitmap): Bitmap {
+        val matrix = Matrix().apply { preScale(-1f, 1f) }
         return Bitmap.createBitmap(source, 0, 0, source.width, source.height, matrix, true)
     }
 
@@ -343,6 +358,7 @@ class TwoStepDiceDetector(private val context: Context) {
     data class ClassifiedDetection(
         val boundingBox: RectF,
         val detectionConfidence: Float,
+        val rawClassId: Int,
         val classId: Int,
         val className: String,
         val classificationConfidence: Float,

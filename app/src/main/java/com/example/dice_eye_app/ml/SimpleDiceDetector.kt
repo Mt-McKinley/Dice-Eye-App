@@ -18,6 +18,11 @@ class SimpleDiceDetector(private val context: Context) {
     private var modelFile: File? = null
 
     init {
+        // Log and validate mapping once for visibility in logs
+        ClassMapping.logMapping()
+        if (!ClassMapping.isValid()) {
+            Log.e(TAG, "ClassMapping is invalid – check folder order and mapping table!")
+        }
         tryLoadModel()
     }
 
@@ -86,7 +91,8 @@ class SimpleDiceDetector(private val context: Context) {
         val detections = mutableListOf<Detection>()
 
         for (i in 0 until numDice) {
-            val diceValue = Random.nextInt(0, 6) // 0-5 for classId
+            val rawIdx = Random.nextInt(0, 6) // 0-5 model class index
+            val mappedIdx = ClassMapping.map(rawIdx).let { if (it >= 0) it else rawIdx }
             val confidence = Random.nextFloat() * 0.4f + 0.6f // 0.6 to 1.0
 
             // Random position within image bounds
@@ -103,8 +109,8 @@ class SimpleDiceDetector(private val context: Context) {
                         centerY + size/2
                     ),
                     confidence = confidence,
-                    classId = diceValue,
-                    className = "Dice ${diceValue + 1}"
+                    classId = mappedIdx,
+                    className = "Face ${mappedIdx + 1}"
                 )
             )
         }
