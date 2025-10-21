@@ -16,6 +16,11 @@ android {
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        // Ensure native libraries are packaged
+        ndk {
+            abiFilters.addAll(listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64"))
+        }
     }
 
     buildTypes {
@@ -27,6 +32,14 @@ android {
             )
         }
     }
+
+    // Ensure assets are included
+    sourceSets {
+        getByName("main") {
+            assets.srcDirs("src/main/assets")
+        }
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -42,6 +55,27 @@ android {
     buildFeatures {
         compose = true
     }
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging = false
+            pickFirsts.add("lib/arm64-v8a/libc++_shared.so")
+            pickFirsts.add("lib/armeabi-v7a/libc++_shared.so")
+            pickFirsts.add("lib/x86/libc++_shared.so")
+            pickFirsts.add("lib/x86_64/libc++_shared.so")
+        }
+        resources {
+            excludes += "/META-INF/{AL2.0,LGPL2.1}"
+            excludes += "/META-INF/DEPENDENCIES"
+        }
+    }
+}
+
+configurations.all {
+    resolutionStrategy {
+        // Force exclude litert-api to prevent conflicts with tensorflow-lite
+        exclude(group = "com.google.ai.edge.litert", module = "litert-api")
+    }
 }
 
 dependencies {
@@ -54,21 +88,28 @@ dependencies {
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.compose.material3)
 
-    // Navigation - direct implementation with fixed version
-    implementation("androidx.navigation:navigation-compose:2.7.6")
+    // Material Icons Extended (using older version without TensorFlow Lite conflicts)
+    implementation("androidx.compose.material:material-icons-extended:1.6.8")
 
-    // CameraX - direct implementation with fixed versions
-    implementation("androidx.camera:camera-core:1.3.0-beta02")
-    implementation("androidx.camera:camera-camera2:1.3.0-beta02")
-    implementation("androidx.camera:camera-lifecycle:1.3.0-beta02")
-    implementation("androidx.camera:camera-view:1.3.0-beta02")
-    implementation("androidx.camera:camera-extensions:1.3.0-beta02")
+    // Navigation
+    implementation(libs.androidx.navigation.compose)
+
+    // CameraX - use version catalog
+    implementation(libs.androidx.camera.core)
+    implementation(libs.androidx.camera.camera2)
+    implementation(libs.androidx.camera.lifecycle)
+    implementation(libs.androidx.camera.view)
+    implementation(libs.androidx.camera.extensions)
 
     // Lifecycle for camera
-    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.6.2")
+    implementation(libs.androidx.lifecycle.runtime.compose)
 
-    // Permissions handling
-    implementation("com.google.accompanist:accompanist-permissions:0.30.1")
+    // Permissions handling - use version catalog
+    implementation(libs.accompanist.permissions)
+
+    // TensorFlow Lite for ML model inference - use version catalog
+    implementation(libs.tensorflow.lite)
+    implementation(libs.tensorflow.lite.support)
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
