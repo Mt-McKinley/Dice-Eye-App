@@ -54,7 +54,7 @@ import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.ImageProxy
 import androidx.core.content.ContextCompat
 import com.example.dice_eye_app.camera.CameraPreview
-import com.example.dice_eye_app.ml.TwoStepDiceDetector
+import com.example.dice_eye_app.ml.SingleModelDiceDetector
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.isGranted
 import com.google.accompanist.permissions.rememberPermissionState
@@ -81,14 +81,23 @@ fun GameScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val cameraPermissionState = rememberPermissionState(permission = android.Manifest.permission.CAMERA)
+    val storagePermissionState = rememberPermissionState(permission = android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
 
-    // Initialize TwoStepDiceDetector (detection + classification)
-    val twoStepDetector = remember { TwoStepDiceDetector(context) }
+    // Request storage permission on startup if not granted
+    DisposableEffect(Unit) {
+        if (!storagePermissionState.status.isGranted) {
+            storagePermissionState.launchPermissionRequest()
+        }
+        onDispose { }
+    }
+
+    // Initialize SingleModelDiceDetector (one YOLO model for both detection and classification)
+    val diceDetector = remember { SingleModelDiceDetector(context) }
 
     // Clean up detector when composable is disposed
     DisposableEffect(Unit) {
         onDispose {
-            twoStepDetector.close()
+            diceDetector.close()
         }
     }
 
@@ -135,16 +144,16 @@ fun GameScreen(
 
                             statusMessage = "Analyzing dice..."
 
-                            // Run two-step detection + classification on background thread
+                            // Run single-model detection + classification on background thread
                             val results = withContext(Dispatchers.Default) {
-                                twoStepDetector.detectAndClassify(bitmap)
+                                diceDetector.detectAndClassify(bitmap)
                             }
 
                             android.util.Log.d("GameScreen", "Detections (with classification): ${results.size}")
 
-                            // Extract dice values (classId + 1 to get dice value 1-6)
+                            // Extract dice face values (already 1-6)
                             val detectedValues = results
-                                .map { it.classId + 1 }
+                                .map { it.faceValue }
                                 .sorted()
 
                             detectedDice = detectedValues

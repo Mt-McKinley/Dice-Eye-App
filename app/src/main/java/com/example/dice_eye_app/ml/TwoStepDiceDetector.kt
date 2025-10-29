@@ -2,7 +2,6 @@ package com.example.dice_eye_app.ml
 
 import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.Matrix
 import android.graphics.RectF
 import android.util.Log
 import com.example.dice_eye_app.util.DebugBitmap
@@ -10,19 +9,19 @@ import com.example.dice_eye_app.util.DebugConfig
 
 /**
  * Two-step dice detection and classification
- * Step 1: Detect dice locations using die_detection.tflite
- * Step 2: Classify each detected die (1-6) using die_classification.tflite
+ * Step 1: Detect dice locations using YOLO11s (die_classifier.tflite)
+ * Step 2: Classify each detected die (1-6) using die_classifier.tflite
  */
 class TwoStepDiceDetector(private val context: Context) {
 
     private val detector = DiceDetector(context)
     private val classifier = DiceClassifier(context)
 
-    // Filtering thresholds have been relaxed to avoid incorrectly discarding valid dice.
-    private val minClassificationConfidence = 0.25f
-    private val minCombinedConfidence = 0.05f
-    // Tighten top-1 margin to avoid ambiguous/wrong classes
-    private val minTop1Margin = 0.20f
+    // Accept all classifications - just use the highest probability
+    // This ensures every detected die gets a classification
+    private val minClassificationConfidence = 0.0f  // Accept any confidence
+    private val minCombinedConfidence = 0.0f        // Accept any combined score
+    private val minTop1Margin = 0.0f                // Accept any margin - just take best guess
     private val finalNmsIou = 0.40f
     private val maxFinalDetections = 10
 
@@ -91,24 +90,21 @@ class TwoStepDiceDetector(private val context: Context) {
                             Log.e(TAG, "===========================================")
                         }
 
-                        if (margin < minTop1Margin) {
-                            Log.d(TAG, "Discarding ambiguous classification (margin=${"%.3f".format(margin)}) for die ${index + 1}")
-                        } else {
-                            val raw = classification.classId
-                            val mappedId = if (DebugConfig.BYPASS_CLASS_MAPPING) raw else ClassMapping.map(raw).let { if (it >= 0) it else raw }
-                            val combined = detection.confidence * classification.confidence
-                            val cd = ClassifiedDetection(
-                                boundingBox = detection.boundingBox,
-                                detectionConfidence = detection.confidence,
-                                rawClassId = raw,
-                                classId = mappedId,
-                                className = "Face ${mappedId + 1}",
-                                classificationConfidence = classification.confidence,
-                                combinedConfidence = combined
-                            )
-                            Log.d(TAG, "Die ${index + 1}: RAW=${raw + 1} -> MAPPED=${mappedId + 1}, Conf=${"%.3f".format(classification.confidence)}, Margin=${"%.3f".format(margin)}, Combined=${"%.3f".format(combined)})")
-                            classified.add(cd)
-                        }
+                        // Accept all classifications - just use highest probability
+                        val raw = classification.classId
+                        val mappedId = if (DebugConfig.BYPASS_CLASS_MAPPING) raw else ClassMapping.map(raw).let { if (it >= 0) it else raw }
+                        val combined = detection.confidence * classification.confidence
+                        val cd = ClassifiedDetection(
+                            boundingBox = detection.boundingBox,
+                            detectionConfidence = detection.confidence,
+                            rawClassId = raw,
+                            classId = mappedId,
+                            className = "Face ${mappedId + 1}",
+                            classificationConfidence = classification.confidence,
+                            combinedConfidence = combined
+                        )
+                        Log.d(TAG, "Die ${index + 1}: RAW=${raw + 1} -> MAPPED=${mappedId + 1}, Conf=${"%.3f".format(classification.confidence)}, Margin=${"%.3f".format(margin)}, Combined=${"%.3f".format(combined)})")
+                        classified.add(cd)
                     } else {
                         Log.w(TAG, "Die ${index + 1}: Classification failed")
                     }
@@ -230,77 +226,23 @@ class TwoStepDiceDetector(private val context: Context) {
     }
 
     private fun classifyWithRotations(cropped: Bitmap): DiceClassifier.ClassificationResult? {
-        val angles = intArrayOf(0, 90, 180, 270)
-        val allProbs = mutableListOf<FloatArray>()
-        val temps = mutableListOf<Bitmap>()
+        // Simplified: Just classify the original crop without rotation/flip augmentation
+        // Test-Time Augmentation (TTA) can hurt performance if model wasn't trained for rotation invariance
+        return try {
+            val result = classifier.classify(cropped)
 
-        try {
-            for (deg in angles) {
-                val rotated = if (deg == 0) cropped else rotateBitmap(cropped, deg.toFloat())
-                if (deg != 0) temps.add(rotated)
-                if (DebugConfig.ENABLED && DebugConfig.SAVE_ROTATED_VARIANTS) {
-                    DebugBitmap.saveBitmap(context, rotated, "crop_rot_${deg}")
-                }
-                classifier.classify(rotated)?.let { allProbs.add(it.allProbabilities) }
-
-                // Horizontal flip TTA
-                val flipped = flipHorizontal(rotated)
-                temps.add(flipped)
-                if (DebugConfig.ENABLED && DebugConfig.SAVE_ROTATED_VARIANTS) {
-                    DebugBitmap.saveBitmap(context, flipped, "crop_rot_${deg}_flip")
-                }
-                classifier.classify(flipped)?.let { allProbs.add(it.allProbabilities) }
+            if (result != null && DebugConfig.ENABLED && DebugConfig.LOG_CLASSIFIER_DETAILS) {
+                Log.d(TAG, "Classification (no TTA): class=${result.classId}, conf=${"%.3f".format(result.confidence)}")
+                Log.d(TAG, "All probabilities: ${result.allProbabilities.joinToString { "%.3f".format(it) }}")
             }
 
-            if (allProbs.isEmpty()) return null
-
-            // Average the probabilities across all variants
-            val avgProbs = FloatArray(allProbs[0].size)
-            for (probs in allProbs) {
-                for (i in avgProbs.indices) {
-                    avgProbs[i] += probs[i]
-                }
-            }
-            for (i in avgProbs.indices) {
-                avgProbs[i] /= allProbs.size
-            }
-
-            // Find the best class from the averaged probabilities
-            var maxProb = -1f
-            var predictedClass = -1
-            avgProbs.forEachIndexed { index, p ->
-                if (p > maxProb) {
-                    maxProb = p
-                    predictedClass = index
-                }
-            }
-
-            Log.d(TAG, "Averaged probabilities: ${avgProbs.joinToString { "%.3f".format(it) }}")
-            return DiceClassifier.ClassificationResult(
-                classId = predictedClass,
-                className = "Face ${predictedClass + 1}",
-                confidence = maxProb,
-                allProbabilities = avgProbs
-            )
-
-        } finally {
-            // Recycle temporary rotated/flipped bitmaps (keep original cropped)
-            for (bmp in temps) {
-                try { bmp.recycle() } catch (_: Exception) {}
-            }
+            result
+        } catch (e: Exception) {
+            Log.e(TAG, "Classification error", e)
+            null
         }
     }
 
-    private fun rotateBitmap(source: Bitmap, angle: Float): Bitmap {
-        val matrix = Matrix()
-        matrix.postRotate(angle)
-        return Bitmap.createBitmap(source, 0, 0, source.width, source.height, matrix, true)
-    }
-
-    private fun flipHorizontal(source: Bitmap): Bitmap {
-        val matrix = Matrix().apply { preScale(-1f, 1f) }
-        return Bitmap.createBitmap(source, 0, 0, source.width, source.height, matrix, true)
-    }
 
     private fun top1Margin(probs: FloatArray): Float {
         if (probs.isEmpty()) return 0f

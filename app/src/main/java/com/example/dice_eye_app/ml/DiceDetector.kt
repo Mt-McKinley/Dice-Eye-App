@@ -23,7 +23,7 @@ import java.nio.FloatBuffer
  *
  * This class is responsible for Step 1 of the two-step detection process:
  * 1. Pre-processes the input bitmap (resizing, letterboxing).
- * 2. Runs inference using the `die_detection.tflite` model.
+ * 2. Runs inference using the YOLO11s model (`die_classifier.tflite`).
  * 3. Post-processes the model's output to generate a list of bounding boxes for potential dice.
  *
  * @param context The application context, used for asset loading and diagnostics.
@@ -31,12 +31,13 @@ import java.nio.FloatBuffer
 class DiceDetector(private val context: Context) {
 
     // Configuration for the detection model and post-processing.
+    // Using the same YOLO11s model as the classifier (single-stage approach)
     private object Config {
-        const val MODEL_FILENAME = "die_detection.tflite"
+        const val MODEL_FILENAME = "die_classifier.tflite"  // Same model as classifier
         const val NUM_THREADS = 4
 
         // Detection thresholds, tuned for a balance of precision and recall.
-        const val CONFIDENCE_THRESHOLD = 0.25f // Minimum score for a detection to be considered valid.
+        const val CONFIDENCE_THRESHOLD = 0.15f // Lowered to detect more dice (was 0.25)
         const val IOU_THRESHOLD = 0.45f        // Threshold for non-maximum suppression (NMS).
 
         // Sanity filters for bounding boxes to eliminate obvious false positives.
@@ -309,8 +310,255 @@ class DiceDetector(private val context: Context) {
     /**
      * Processes the raw outputs into a list of Detection objects. This method is tolerant
      * to different output tensor orders; it will identify boxes/scores/classes by shape.
+     *
+     * Supports both:
+     * - YOLO11 format: Single output tensor [1, num_predictions, 84+] where each prediction is [x, y, w, h, class0_conf, class1_conf, ...]
+     * - Legacy format: Separate tensors for boxes, scores, classes
      */
     private fun postprocess(outputs: Map<Int, Any>, originalBitmap: Bitmap, interp: Interpreter): List<Detection> {
+        Log.d(TAG, "Postprocessing: parsing ${outputs.size} output tensors")
+
+        // Check if this is YOLO11 single-output format
+        if (outputs.size == 1 && outputs.containsKey(0)) {
+            val outputTensor = interp.getOutputTensor(0)
+            val shape = outputTensor.shape()
+            Log.d(TAG, "Single output tensor detected: shape=${shape.contentToString()}")
+
+            // YOLO11 can output in two formats:
+            // 1. [1, num_predictions, features] - standard format
+            // 2. [1, num_classes, num_predictions] - transposed format
+
+            if (shape.size == 3) {
+                // Detect which format based on dimensions
+                val dim1 = shape[1]
+                val dim2 = shape[2]
+
+                // If dim2 is much larger than dim1, it's likely transposed format
+                // e.g., [1, 10, 8400] = [batch, classes, predictions]
+                val isTransposed = dim2 > dim1 && dim2 > 100
+
+                if (isTransposed) {
+                    Log.d(TAG, "Detected transposed YOLO format: [1, $dim1 classes, $dim2 predictions]")
+                    return postprocessYOLO11Transposed(outputs[0]!!, shape, originalBitmap)
+                } else if (dim2 >= 5) {
+                    Log.d(TAG, "Detected standard YOLO format: [1, $dim1 predictions, $dim2 features]")
+                    return postprocessYOLO11Standard(outputs[0]!!, shape, originalBitmap)
+                }
+            }
+        }
+
+        // Fall back to legacy multi-tensor format
+        return postprocessLegacyFormat(outputs, originalBitmap, interp)
+    }
+
+    /**
+     * Parse YOLO11 transposed format: [1, num_outputs, num_predictions]
+     * YOLO11 with custom classes outputs [1, 4+num_classes, 8400] where:
+     * - First 4 rows: bounding box coordinates (x, y, w, h)
+     * - Remaining rows: class confidence scores
+     * Format: [batch, outputs, predictions] where outputs = bbox(4) + classes(6) = 10
+     */
+    private fun postprocessYOLO11Transposed(output: Any, shape: IntArray, originalBitmap: Bitmap): List<Detection> {
+        val numOutputs = shape[1]  // Should be 10 (4 bbox + 6 classes)
+        val numPredictions = shape[2]  // Should be 8400
+        Log.d(TAG, "YOLO11 transposed: $numOutputs outputs (4 bbox + ${numOutputs-4} classes), $numPredictions predictions")
+
+        // Extract data: [1, 10, 8400]
+        val data = when (output) {
+            is Array<*> -> {
+                val arr = output as Array<Array<FloatArray>>
+                arr[0]  // [10, 8400]
+            }
+            else -> {
+                Log.e(TAG, "Unsupported output type for transposed format: ${output.javaClass}")
+                return emptyList()
+            }
+        }
+
+        // YOLO11 transposed format structure:
+        // data[0] = x_center for all 8400 predictions
+        // data[1] = y_center for all 8400 predictions
+        // data[2] = width for all 8400 predictions
+        // data[3] = height for all 8400 predictions
+        // data[4..9] = class confidences (6 dice faces)
+
+        val detections = mutableListOf<Detection>()
+        val originalWidth = originalBitmap.width
+        val originalHeight = originalBitmap.height
+        val imageArea = (originalWidth * originalHeight).toFloat()
+
+        val numClasses = numOutputs - 4  // 10 - 4 = 6 classes
+
+        // Process each of the 8400 predictions
+        for (predIdx in 0 until numPredictions) {
+            // Extract bounding box coordinates
+            val centerX = data[0][predIdx]
+            val centerY = data[1][predIdx]
+            val width = data[2][predIdx]
+            val height = data[3][predIdx]
+
+            // Extract class confidence scores (rows 4-9)
+            var maxScore = 0f
+            var maxClassIdx = -1
+            for (classIdx in 0 until numClasses) {
+                val score = data[4 + classIdx][predIdx]
+                if (score > maxScore) {
+                    maxScore = score
+                    maxClassIdx = classIdx
+                }
+            }
+
+            // Apply confidence threshold
+            if (maxScore < Config.CONFIDENCE_THRESHOLD) continue
+
+            // Convert from center format to corner format (normalized 0-1)
+            val x1 = (centerX - width / 2f) / modelInputWidth
+            val y1 = (centerY - height / 2f) / modelInputHeight
+            val x2 = (centerX + width / 2f) / modelInputWidth
+            val y2 = (centerY + height / 2f) / modelInputHeight
+
+            // Convert normalized, letterboxed coordinates back to original image coordinates
+            val rect = denormalizeAndUnpad(x1, y1, x2, y2, originalWidth, originalHeight)
+
+            // Apply sanity filters
+            if (!isValid(rect, imageArea)) {
+                if (DebugConfig.LOG_ALL_DETECTIONS) {
+                    Log.d(TAG, "Detection $predIdx discarded by sanity filters.")
+                }
+                continue
+            }
+
+            // Include the detected class ID (0-5 for dice faces 1-6)
+            detections.add(Detection(boundingBox = rect, confidence = maxScore, classId = maxClassIdx))
+        }
+
+        Log.d(TAG, "Processing ${detections.size} raw detections from model output")
+
+        // Log sample detections with class info
+        for (i in 0 until minOf(3, detections.size)) {
+            val d = detections[i]
+            Log.d(TAG, String.format(Locale.US, "Det[%d]: conf=%.3f classId=%d (face %d) box=[%.1f,%.1f,%.1f,%.1f]",
+                i, d.confidence, d.classId, d.classId + 1, d.boundingBox.left, d.boundingBox.top, d.boundingBox.right, d.boundingBox.bottom))
+        }
+
+        // Apply NMS
+        val finalDetections = applyNMS(detections)
+
+        if (DebugConfig.SAVE_DETECTIONS_OVERLAY) {
+            val labels = finalDetections.map { it.boundingBox to "Die (${String.format(Locale.US, "%.2f", it.confidence)})" }
+            val overlay = DebugBitmap.drawOverlayLabeled(originalBitmap, labels)
+            DebugBitmap.saveBitmap(context, overlay, "detector_final_detections")
+            overlay.recycle()
+        }
+
+        return finalDetections
+    }
+
+    /**
+     * Parse YOLO11 standard format: [1, num_predictions, features]
+     * where features = [x_center, y_center, width, height, class0_conf, class1_conf, ...]
+     */
+    private fun postprocessYOLO11Standard(output: Any, shape: IntArray, originalBitmap: Bitmap): List<Detection> {
+        val numPredictions = shape[1]
+        val numFeatures = shape[2]
+        Log.d(TAG, "YOLO11 standard format: $numPredictions predictions, $numFeatures features each")
+
+        // Extract data from output
+        val data = when (output) {
+            is Array<*> -> {
+                val arr = output as Array<Array<FloatArray>>
+                arr[0]
+            }
+            is FloatArray -> {
+                // Reshape flat array to [num_predictions, num_features]
+                Array(numPredictions) { i ->
+                    FloatArray(numFeatures) { j ->
+                        output[i * numFeatures + j]
+                    }
+                }
+            }
+            else -> {
+                Log.e(TAG, "Unexpected output type: ${output.javaClass}")
+                return emptyList()
+            }
+        }
+
+        val detections = mutableListOf<Detection>()
+        val originalWidth = originalBitmap.width
+        val originalHeight = originalBitmap.height
+        val imageArea = (originalWidth * originalHeight).toFloat()
+
+        // For single-class detection (die), we only have 1 class score
+        val numClasses = numFeatures - 4
+
+        for (i in 0 until numPredictions) {
+            val prediction = data[i]
+
+            // Extract bbox (center_x, center_y, width, height)
+            val centerX = prediction[0]
+            val centerY = prediction[1]
+            val width = prediction[2]
+            val height = prediction[3]
+
+            // Extract confidence score(s) and class - take the max across all classes
+            var maxScore = 0f
+            var maxClassIdx = -1
+            for (j in 4 until numFeatures) {
+                val score = prediction[j]
+                if (score > maxScore) {
+                    maxScore = score
+                    maxClassIdx = j - 4  // Class index (0-5 for dice faces)
+                }
+            }
+
+            if (maxScore < Config.CONFIDENCE_THRESHOLD) continue
+
+            // Convert from center format to corner format
+            val x1 = (centerX - width / 2f) / modelInputWidth
+            val y1 = (centerY - height / 2f) / modelInputHeight
+            val x2 = (centerX + width / 2f) / modelInputWidth
+            val y2 = (centerY + height / 2f) / modelInputHeight
+
+            // Convert normalized, letterboxed coordinates back to original image coordinates
+            val rect = denormalizeAndUnpad(x1, y1, x2, y2, originalWidth, originalHeight)
+
+            // Apply sanity filters
+            if (!isValid(rect, imageArea)) {
+                if (DebugConfig.LOG_ALL_DETECTIONS) {
+                    Log.d(TAG, "Detection $i discarded by sanity filters.")
+                }
+                continue
+            }
+
+            detections.add(Detection(boundingBox = rect, confidence = maxScore, classId = maxClassIdx))
+        }
+
+        Log.d(TAG, "Processing ${detections.size} raw detections from model output")
+
+        // Log sample detections
+        for (i in 0 until minOf(3, detections.size)) {
+            val d = detections[i]
+            Log.d(TAG, String.format(Locale.US, "Det[%d]: conf=%.3f box=[%.1f,%.1f,%.1f,%.1f]",
+                i, d.confidence, d.boundingBox.left, d.boundingBox.top, d.boundingBox.right, d.boundingBox.bottom))
+        }
+
+        // Apply NMS
+        val finalDetections = applyNMS(detections)
+
+        if (DebugConfig.SAVE_DETECTIONS_OVERLAY) {
+            val labels = finalDetections.map { it.boundingBox to "Die (${String.format(Locale.US, "%.2f", it.confidence)})" }
+            val overlay = DebugBitmap.drawOverlayLabeled(originalBitmap, labels)
+            DebugBitmap.saveBitmap(context, overlay, "detector_final_detections")
+            overlay.recycle()
+        }
+
+        return finalDetections
+    }
+
+    /**
+     * Parse legacy multi-tensor output format (separate boxes, scores, classes tensors)
+     */
+    private fun postprocessLegacyFormat(outputs: Map<Int, Any>, originalBitmap: Bitmap, interp: Interpreter): List<Detection> {
         // Identify candidates
         var boxes: Array<Array<FloatArray>>? = null
         val candidates1xN = mutableListOf<FloatArray>()
@@ -545,7 +793,8 @@ class DiceDetector(private val context: Context) {
      */
     data class Detection(
         val boundingBox: RectF,
-        val confidence: Float
+        val confidence: Float,
+        val classId: Int = -1  // Which dice face (0-5 for faces 1-6), -1 if unknown
     )
 
     companion object {

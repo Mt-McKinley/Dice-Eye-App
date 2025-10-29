@@ -47,7 +47,7 @@ object TFLiteDiagnostics {
         results.add("\nTest 2: Checking for model files...")
 
         // Check the detection model (Step 1)
-        val detectionModel = "die_detection.tflite"
+        val detectionModel = "die_classifier.tflite"  // Single model for both detection and classification
         try {
             val modelStream = context.assets.open(detectionModel)
             val modelSize = modelStream.available()
@@ -61,7 +61,7 @@ object TFLiteDiagnostics {
         }
 
         // Check the classification model (Step 2)
-        val classificationModel = "die_classification.tflite"
+        val classificationModel = "die_classifier.tflite"
         try {
             val modelStream = context.assets.open(classificationModel)
             val modelSize = modelStream.available()
@@ -89,7 +89,7 @@ object TFLiteDiagnostics {
         lines += "  MODEL HEALTH REPORT"
         lines += "═══════════════════════════════════════════════════"
 
-        val det = inspectModel(context, "die_detection.tflite")
+        val det = inspectModel(context, "die_classifier.tflite")  // Single model for both
         lines += "[Detection] Input: shape=${det.inputShape.contentToString()}, type=${det.inputType}"
         det.inputQuant?.let { q -> lines += "[Detection] Input quant: scale=${q.scale}, zeroPoint=${q.zeroPoint}" }
         for (i in det.outputs.indices) {
@@ -104,7 +104,7 @@ object TFLiteDiagnostics {
         if (scoresIdx >= 0) lines += "[Detection] Scores tensor index: $scoresIdx"
         if (countIdx >= 0) lines += "[Detection] Count tensor index: $countIdx"
 
-        val cls = inspectModel(context, "die_classification.tflite")
+        val cls = inspectModel(context, "die_classifier.tflite")
         lines += "[Classification] Input: shape=${cls.inputShape.contentToString()}, type=${cls.inputType}"
         cls.inputQuant?.let { q -> lines += "[Classification] Input quant: scale=${q.scale}, zeroPoint=${q.zeroPoint}" }
         if (cls.outputs.isNotEmpty()) {

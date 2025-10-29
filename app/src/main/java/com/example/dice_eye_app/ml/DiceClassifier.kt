@@ -22,7 +22,7 @@ class DiceClassifier(private val context: Context) {
     private var interpreter: Interpreter? = null
     private var modelLoaded = false
 
-    private val modelFileName = "die_classification.tflite"
+    private val modelFileName = "die_classifier.tflite"
 
     // Model configuration - auto-detected from model
     private var inputWidth = 224
@@ -42,7 +42,7 @@ class DiceClassifier(private val context: Context) {
     // Optional normalization toggles for FLOAT32 input models
     private val normalizeZeroOne = true       // default
     private val normalizeMinusOneToOne = false
-    private val useImagenetMeanStd = false    // mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225]
+    private val useImagenetMeanStd = false    // Model expects UINT8, not normalized FLOAT32
 
     init {
         loadModel()
@@ -122,6 +122,7 @@ class DiceClassifier(private val context: Context) {
 
     /**
      * Classifies a cropped die image into faces 1-6
+     * Supports both simple classification output [1, 6] and YOLO format [1, num_classes, 8400]
      * @param bitmap The cropped die image
      * @return ClassificationResult with predicted class (0-5 for faces 1-6) and confidence
      */
@@ -133,9 +134,140 @@ class DiceClassifier(private val context: Context) {
 
         try {
             val interp = interpreter!!
+            val outputTensor = interp.getOutputTensor(0)
+            val outputShape = outputTensor.shape()
 
-            // Build input buffer based on input tensor type
-            val inputBuffer: Any = when (inputDataType) {
+            // Detect if this is a YOLO model (3D output) or simple classifier (2D output)
+            val isYoloFormat = outputShape.size == 3
+
+            if (isYoloFormat) {
+                Log.d(TAG, "Detected YOLO format output: shape=${outputShape.contentToString()}")
+                return classifyWithYoloModel(bitmap, interp, outputShape)
+            } else {
+                Log.d(TAG, "Detected simple classification output: shape=${outputShape.contentToString()}")
+                return classifyWithSimpleModel(bitmap, interp)
+            }
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Error during classification", e)
+            return null
+        }
+    }
+
+    /**
+     * Handle YOLO format output: [1, num_classes, num_predictions]
+     * Format is [1, 10, 8400] where:
+     *   - 10 classes (but we only use first 6 for dice faces 1-6)
+     *   - 8400 predictions (grid cells from feature maps)
+     *
+     * For each of 6 dice classes, we extract confidence across all grid cells
+     * and use max/average to get overall class confidence
+     */
+    private fun classifyWithYoloModel(bitmap: Bitmap, interp: Interpreter, outputShape: IntArray): ClassificationResult? {
+        try {
+            // Build input buffer
+            val effectiveInputType = if (DebugConfig.FORCE_FLOAT32_INPUT) {
+                Log.w(TAG, "⚠️ FORCING FLOAT32 preprocessing (DebugConfig.FORCE_FLOAT32_INPUT = true)")
+                DataType.FLOAT32
+            } else {
+                inputDataType
+            }
+
+            val inputBuffer: Any = when (effectiveInputType) {
+                DataType.FLOAT32 -> preprocessImageFloat32(bitmap)
+                DataType.UINT8 -> preprocessImageUint8(bitmap)
+                DataType.INT8 -> preprocessImageInt8(bitmap)
+                else -> {
+                    Log.w(TAG, "Unsupported input type: $inputDataType, defaulting to FLOAT32 path")
+                    preprocessImageFloat32(bitmap)
+                }
+            }
+
+            // Output shape: [1, num_classes, num_predictions]
+            // Example: [1, 10, 8400]
+            val batchSize = outputShape[0]
+            val numClasses = outputShape[1]
+            val numPredictions = outputShape[2]
+
+            Log.d(TAG, "YOLO classification: shape=[${outputShape.joinToString(",")}], using first 6 of $numClasses classes")
+
+            // Allocate output buffer: [1, 10, 8400]
+            val output = Array(batchSize) { Array(numClasses) { FloatArray(numPredictions) } }
+
+            // Run inference
+            interp.run(inputBuffer, output)
+
+            // Extract class confidences for first 6 classes (dice faces)
+            val numDiceClasses = minOf(numClasses, 6)
+            val classScores = FloatArray(6) // Always 6 for dice faces 1-6
+
+            for (c in 0 until numDiceClasses) {
+                val predictions = output[0][c]
+
+                // Strategy: Use max confidence across all grid cells
+                // This finds the strongest activation for this class
+                val maxConf = predictions.maxOrNull() ?: 0f
+
+                // YOLO outputs are often raw logits (large numbers)
+                // Apply sigmoid to convert to 0-1 probability range
+                val normalizedConf = sigmoid(maxConf)
+
+                // Alternative: Use average of top-K predictions
+                // val sorted = predictions.sortedDescending()
+                // val topK = sorted.take(100)
+                // val avgConf = topK.average().toFloat()
+
+                classScores[c] = normalizedConf
+            }
+
+            // Fill remaining classes with 0 if model has <6 classes
+            for (c in numDiceClasses until 6) {
+                classScores[c] = 0f
+            }
+
+            // Apply softmax to get probability distribution
+            val sm = softmax(classScores)
+
+            // Find predicted class (highest probability)
+            var predictedClass = -1
+            var maxProb = -Float.MAX_VALUE
+            for (i in sm.indices) {
+                if (sm[i] > maxProb) {
+                    maxProb = sm[i]
+                    predictedClass = i
+                }
+            }
+
+            val margin = top1Margin(sm)
+
+            // Detailed logging for debugging
+            Log.d(TAG, "YOLO class scores (max per class): ${classScores.joinToString { "%.3f".format(it) }}")
+            Log.d(TAG, "After softmax: ${sm.joinToString { "%.3f".format(it) }} | margin=${"%.3f".format(margin)}")
+            Log.d(TAG, "Classification RAW: class=$predictedClass (Face ${predictedClass + 1}), conf=${"%.3f".format(maxProb)}")
+
+            return ClassificationResult(predictedClass, "Face ${predictedClass + 1}", maxProb, sm)
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in YOLO classification", e)
+            e.printStackTrace()
+            return null
+        }
+    }
+
+    /**
+     * Handle simple classification output: [1, num_classes]
+     */
+    private fun classifyWithSimpleModel(bitmap: Bitmap, interp: Interpreter): ClassificationResult? {
+        try {
+            // Build input buffer
+            val effectiveInputType = if (DebugConfig.FORCE_FLOAT32_INPUT) {
+                Log.w(TAG, "⚠️ FORCING FLOAT32 preprocessing (DebugConfig.FORCE_FLOAT32_INPUT = true)")
+                DataType.FLOAT32
+            } else {
+                inputDataType
+            }
+
+            val inputBuffer: Any = when (effectiveInputType) {
                 DataType.FLOAT32 -> preprocessImageFloat32(bitmap)
                 DataType.UINT8 -> preprocessImageUint8(bitmap)
                 DataType.INT8 -> preprocessImageInt8(bitmap)
@@ -169,7 +301,7 @@ class DiceClassifier(private val context: Context) {
             return result
 
         } catch (e: Exception) {
-            Log.e(TAG, "Error during classification", e)
+            Log.e(TAG, "Error in simple classification", e)
             return null
         }
     }
@@ -310,6 +442,10 @@ class DiceClassifier(private val context: Context) {
         }
         if (sumExp <= 0.0) return FloatArray(logits.size) { 1f / logits.size }
         return FloatArray(logits.size) { (exps[it] / sumExp).toFloat() }
+    }
+
+    private fun sigmoid(x: Float): Float {
+        return (1.0 / (1.0 + exp(-x.toDouble()))).toFloat()
     }
 
     private fun top1Margin(probs: FloatArray): Float {

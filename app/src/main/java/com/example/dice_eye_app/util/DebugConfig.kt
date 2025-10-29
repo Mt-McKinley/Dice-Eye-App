@@ -12,7 +12,7 @@ object DebugConfig {
     const val SAVE_LETTERBOXED = true       // Save letterboxed input to detector
     const val SAVE_DETECTIONS_OVERLAY = true // Save overlay showing all initial detections
     const val SAVE_CROPS = true             // Save cropped die images sent to classifier
-    const val SAVE_ROTATED_VARIANTS = true  // Save rotated variants of crops
+    const val SAVE_ROTATED_VARIANTS = false // Disabled - we're not using TTA anymore
     const val SAVE_FINAL_OVERLAY = true     // Save final labeled result overlay
 
     // Debug logging
@@ -27,7 +27,13 @@ object DebugConfig {
     // Bitmapping diagnostics
     // If true, swap red and blue channels during classifier preprocessing to test
     // BGR vs RGB mismatches.
-    const val SWAP_RB_CHANNELS = false
+    // NOTE: Most TFLite models expect RGB order (standard Android bitmap format)
+    const val SWAP_RB_CHANNELS = false  // Set to false for standard RGB TFLite models
+
+    // Force FLOAT32 preprocessing even if model says UINT8
+    // Use this to test if the model was trained with normalized 0.0-1.0 inputs
+    // but the TFLite metadata incorrectly says UINT8
+    const val FORCE_FLOAT32_INPUT = false  // Model actually expects UINT8, not FLOAT32
 
     // Path for saving debug images
     const val DEBUG_PATH = "DiceEyeApp/debug"  // Subdirectory under Pictures for debug images

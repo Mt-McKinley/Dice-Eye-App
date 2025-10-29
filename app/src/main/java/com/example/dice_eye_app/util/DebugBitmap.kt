@@ -6,6 +6,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.RectF
+import android.media.MediaScannerConnection
 import android.os.Environment
 import android.util.Log
 import java.io.File
@@ -23,6 +24,7 @@ object DebugBitmap {
 
     /**
      * Save a bitmap to the debug directory with the given base name
+     * Saves to public Pictures/DiceEyeDebug folder so it's visible via MTP on Windows
      */
     fun saveBitmap(context: Context, bitmap: Bitmap, baseName: String) {
         if (!DebugConfig.ENABLED) return
@@ -31,24 +33,67 @@ object DebugBitmap {
             val timestamp = dateFormat.format(Date())
             val filename = "${timestamp}_${baseName}.jpg"
 
-            // Use app-specific directory which doesn't require special permissions
-            val path = File(context.getExternalFilesDir(Environment.DIRECTORY_PICTURES), DebugConfig.DEBUG_PATH)
+            // Try public Pictures directory first (visible via MTP)
+            var savedSuccessfully = false
+            try {
+                val picturesDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
+                val path = File(picturesDir, "DiceEyeDebug")
 
-            // Make sure directory exists
-            if (!path.exists()) {
-                val success = path.mkdirs()
-                if (!success) {
-                    Log.e(TAG, "Failed to create debug directory at ${path.absolutePath}")
-                    return
+                // Make sure directory exists
+                if (!path.exists()) {
+                    val success = path.mkdirs()
+                    Log.d(TAG, "Created directory: ${path.absolutePath}, success=$success")
+                }
+
+                val file = File(path, filename)
+                FileOutputStream(file).use { out ->
+                    bitmap.compress(Bitmap.CompressFormat.JPEG, 90, out)
+                    out.flush()
+                }
+
+                // Verify file was actually written
+                if (file.exists() && file.length() > 0) {
+                    Log.e(TAG, "✅ SAVED TO PUBLIC PICTURES: ${file.absolutePath} (${file.length() / 1024}KB)")
+
+                    // Trigger media scan so Windows MTP sees the file immediately
+                    MediaScannerConnection.scanFile(
+                        context,
+                        arrayOf(file.absolutePath),
+                        arrayOf("image/jpeg"),
+                        null
+                    )
+
+                    savedSuccessfully = true
+                } else {
+                    Log.e(TAG, "❌ File not created or empty: ${file.absolutePath}")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to save to public Pictures, trying app-specific storage: ${e.message}")
+            }
+
+            // Fallback: Try app-specific storage (always works, no permissions needed)
+            if (!savedSuccessfully) {
+                try {
+                    val appPath = File(context.getExternalFilesDir(Environment.DIRECTORY_PICTURES), "DiceEyeDebug")
+                    if (!appPath.exists()) {
+                        appPath.mkdirs()
+                    }
+
+                    val file = File(appPath, filename)
+                    FileOutputStream(file).use { out ->
+                        bitmap.compress(Bitmap.CompressFormat.JPEG, 90, out)
+                        out.flush()
+                    }
+
+                    if (file.exists() && file.length() > 0) {
+                        Log.e(TAG, "✅ SAVED TO APP-SPECIFIC: ${file.absolutePath} (${file.length() / 1024}KB)")
+                        Log.e(TAG, "⚠️ NOTE: App-specific files NOT visible via MTP until you use a file manager on the phone")
+                    }
+                } catch (e2: Exception) {
+                    Log.e(TAG, "❌ FAILED BOTH LOCATIONS: ${e2.message}", e2)
                 }
             }
 
-            val file = File(path, filename)
-            FileOutputStream(file).use { out ->
-                bitmap.compress(Bitmap.CompressFormat.JPEG, 90, out)
-            }
-
-            Log.d(TAG, "Saved debug image: ${file.absolutePath}")
         } catch (e: Exception) {
             Log.e(TAG, "Error saving debug image", e)
         }
