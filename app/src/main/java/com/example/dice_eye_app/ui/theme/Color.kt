@@ -2,10 +2,14 @@ package com.example.dice_eye_app.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
-val Purple80 = Color(0xFFD0BCFF)
-val PurpleGrey80 = Color(0xFFCCC2DC)
-val Pink80 = Color(0xFFEFB8C8)
+// Dice Eye Brand Colors - from logo
+val DiceEyeCyan = Color(0xFF00D4FF)      // Bright cyan from logo
+val DiceEyeCyanLight = Color(0xFF66E5FF) // Lighter cyan for accents
+val DiceEyeDarkBlue = Color(0xFF1E3A4F)  // Dark blue background from logo
+val DiceEyeNavy = Color(0xFF2A4A5E)      // Lighter navy for surfaces
+val DiceEyeBackground = Color(0xFF0F1F2B) // Very dark blue for background
 
-val Purple40 = Color(0xFF6650a4)
-val PurpleGrey40 = Color(0xFF625b71)
-val Pink40 = Color(0xFF7D5260)
+// Light theme variants
+val DiceEyeCyanDark = Color(0xFF0099CC)  // Darker cyan for light theme
+val DiceEyeLightBg = Color(0xFFF0F4F8)   // Light background
+val DiceEyeLightSurface = Color(0xFFFFFFFF) // White surface

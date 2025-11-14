@@ -22,15 +22,24 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.CameraAlt
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -46,6 +55,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.camera.core.CameraSelector
@@ -54,7 +64,12 @@ import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.ImageProxy
 import androidx.core.content.ContextCompat
 import com.example.dice_eye_app.camera.CameraPreview
+import com.example.dice_eye_app.data.RollHistoryManager
 import com.example.dice_eye_app.ml.SingleModelDiceDetector
+import com.example.dice_eye_app.ui.theme.DiceEyeCyan
+import com.example.dice_eye_app.ui.theme.DiceEyeCyanLight
+import com.example.dice_eye_app.ui.theme.DiceEyeDarkBlue
+import com.example.dice_eye_app.ui.theme.DiceEyeNavy
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.isGranted
 import com.google.accompanist.permissions.rememberPermissionState
@@ -70,10 +85,10 @@ import java.io.ByteArrayOutputStream
 @Composable
 fun GameScreen(
     onNavigateBack: () -> Unit,
+    onNavigateToHistory: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     var detectedDice by remember { mutableStateOf<List<Int>>(emptyList()) }
-    var rollHistory by remember { mutableStateOf(listOf<List<Int>>()) }
     var imageCapture by remember { mutableStateOf<ImageCapture?>(null) }
     var isProcessing by remember { mutableStateOf(false) }
     var statusMessage by remember { mutableStateOf("Ready to capture") }
@@ -163,6 +178,9 @@ fun GameScreen(
                             } else {
                                 val total = detectedValues.sum()
                                 statusMessage = "Detected ${detectedValues.size} dice - Total: $total"
+                                
+                                // Auto-save to history
+                                RollHistoryManager.addRoll(detectedValues)
                             }
 
                             android.util.Log.d("GameScreen", "Detected dice values: $detectedValues")
@@ -189,12 +207,47 @@ fun GameScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Dice Monitor") },
+                title = { 
+                    Column {
+                        Text(
+                            "DICE EYE",
+                            style = MaterialTheme.typography.titleLarge.copy(
+                                fontWeight = FontWeight.Bold,
+                                letterSpacing = 2.sp
+                            )
+                        )
+                        Text(
+                            "Keep Your Eye on the Die",
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                letterSpacing = 1.sp
+                            ),
+                            color = DiceEyeCyanLight
+                        )
+                    }
+                },
                 navigationIcon = {
                     IconButton(onClick = onNavigateBack) {
-                        Text("Back")
+                        Icon(
+                            imageVector = Icons.Default.ArrowBack,
+                            contentDescription = "Back"
+                        )
                     }
-                }
+                },
+                actions = {
+                    IconButton(onClick = onNavigateToHistory) {
+                        Icon(
+                            imageVector = Icons.Default.History,
+                            contentDescription = "View History",
+                            tint = DiceEyeCyan
+                        )
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = DiceEyeDarkBlue,
+                    titleContentColor = DiceEyeCyan,
+                    navigationIconContentColor = DiceEyeCyan,
+                    actionIconContentColor = DiceEyeCyan
+                )
             )
         },
         floatingActionButton = {
@@ -205,29 +258,32 @@ fun GameScreen(
                     }
                 },
                 containerColor = if (isProcessing)
-                    MaterialTheme.colorScheme.secondary
+                    DiceEyeCyanLight
                 else
-                    MaterialTheme.colorScheme.primary
+                    DiceEyeCyan,
+                contentColor = DiceEyeDarkBlue
             ) {
                 if (isProcessing) {
                     CircularProgressIndicator(
                         modifier = Modifier.size(24.dp),
-                        color = MaterialTheme.colorScheme.onPrimary
+                        color = DiceEyeDarkBlue
                     )
                 } else {
-                    Text(
-                        text = "📷",
-                        fontSize = 24.sp,
-                        color = MaterialTheme.colorScheme.onPrimary
+                    Icon(
+                        imageVector = Icons.Default.CameraAlt,
+                        contentDescription = "Capture",
+                        modifier = Modifier.size(32.dp)
                     )
                 }
             }
         },
+        containerColor = Color(0xFF0F1F2B),
         modifier = modifier.fillMaxSize()
     ) { innerPadding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
+                .verticalScroll(rememberScrollState())
                 .padding(innerPadding)
                 .padding(16.dp),
             verticalArrangement = Arrangement.Top,
@@ -237,13 +293,17 @@ fun GameScreen(
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(bottom = 8.dp)
+                    .padding(bottom = 8.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = DiceEyeNavy
+                )
             ) {
                 Text(
                     text = statusMessage,
                     modifier = Modifier.padding(12.dp),
                     style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.Medium
+                    fontWeight = FontWeight.Medium,
+                    color = DiceEyeCyanLight
                 )
             }
 
@@ -252,8 +312,8 @@ fun GameScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .aspectRatio(4f / 3f)
-                    .background(Color.LightGray, RoundedCornerShape(8.dp))
-                    .border(2.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(8.dp)),
+                    .background(DiceEyeDarkBlue, RoundedCornerShape(8.dp))
+                    .border(2.dp, DiceEyeCyan, RoundedCornerShape(8.dp)),
                 contentAlignment = Alignment.Center
             ) {
                 if (cameraPermissionState.status.isGranted) {
@@ -276,10 +336,16 @@ fun GameScreen(
                         Text(
                             "Camera permission is required",
                             style = MaterialTheme.typography.bodyLarge,
-                            color = Color.Black
+                            color = DiceEyeCyanLight
                         )
                         Spacer(modifier = Modifier.height(8.dp))
-                        Button(onClick = { cameraPermissionState.launchPermissionRequest() }) {
+                        Button(
+                            onClick = { cameraPermissionState.launchPermissionRequest() },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = DiceEyeCyan,
+                                contentColor = DiceEyeDarkBlue
+                            )
+                        ) {
                             Text("Request Permission")
                         }
                     }
@@ -292,7 +358,10 @@ fun GameScreen(
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(vertical = 8.dp)
+                    .padding(vertical = 8.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = DiceEyeNavy
+                )
             ) {
                 Column(
                     modifier = Modifier.padding(16.dp),
@@ -300,7 +369,8 @@ fun GameScreen(
                 ) {
                     Text(
                         text = "Last Detected Roll",
-                        style = MaterialTheme.typography.titleMedium
+                        style = MaterialTheme.typography.titleMedium,
+                        color = DiceEyeCyanLight
                     )
 
                     Spacer(modifier = Modifier.height(8.dp))
@@ -310,92 +380,41 @@ fun GameScreen(
                         style = MaterialTheme.typography.headlineLarge,
                         fontWeight = FontWeight.Bold,
                         color = if (detectedDice.isNotEmpty())
-                            MaterialTheme.colorScheme.primary
+                            DiceEyeCyan
                         else
-                            MaterialTheme.colorScheme.onSurfaceVariant
+                            DiceEyeCyanLight.copy(alpha = 0.5f)
                     )
 
                     Spacer(modifier = Modifier.height(8.dp))
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceEvenly
+                        horizontalArrangement = Arrangement.Center
                     ) {
-                        Button(
-                            onClick = {
-                                if (detectedDice.isNotEmpty()) {
-                                    rollHistory = rollHistory + listOf(detectedDice)
-                                    statusMessage = "Rolls ${detectedDice.joinToString(", ")} added to history"
-                                    detectedDice = emptyList()
-                                }
-                            },
-                            enabled = detectedDice.isNotEmpty()
-                        ) {
-                            Text("Save Roll")
-                        }
-
                         Button(
                             onClick = {
                                 detectedDice = emptyList()
                                 statusMessage = "Ready to capture"
                             },
-                            enabled = detectedDice.isNotEmpty()
-                        ) {
-                            Text("Reset")
-                        }
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // Roll history
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
-            ) {
-                Column(
-                    modifier = Modifier.padding(16.dp)
-                ) {
-                    Text(
-                        text = "Roll History (${rollHistory.size} rolls)",
-                        style = MaterialTheme.typography.titleMedium
-                    )
-
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    if (rollHistory.isEmpty()) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(32.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                "No rolls recorded yet",
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            enabled = detectedDice.isNotEmpty(),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = DiceEyeCyan,
+                                contentColor = DiceEyeDarkBlue
                             )
-                        }
-                    } else {
-                        // This would be a LazyColumn in a real implementation
-                        Column {
-                            rollHistory.reversed().forEachIndexed { index, roll ->
-                                if (index > 0) {
-                                    HorizontalDivider()
-                                }
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(vertical = 8.dp),
-                                    horizontalArrangement = Arrangement.SpaceBetween
-                                ) {
-                                    Text("Roll #${rollHistory.size - index}")
-                                    Text(roll.joinToString(", "), fontWeight = FontWeight.Bold)
-                                }
-                            }
+                        ) {
+                            Text("Clear")
                         }
                     }
+                    
+                    Spacer(modifier = Modifier.height(8.dp))
+                    
+                    Text(
+                        text = "Rolls are automatically saved to History",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = DiceEyeCyanLight.copy(alpha = 0.6f),
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth()
+                    )
                 }
             }
         }

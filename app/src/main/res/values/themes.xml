@@ -2,4 +2,12 @@
 <resources>
 
     <style name="Theme.DiceEyeApp" parent="android:Theme.Material.Light.NoActionBar" />
+    
+    <!-- Splash Screen Theme -->
+    <style name="Theme.DiceEyeApp.Splash" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/dice_eye_dark_blue</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/dice_eye</item>
+        <item name="windowSplashScreenAnimationDuration">1000</item>
+        <item name="postSplashScreenTheme">@style/Theme.DiceEyeApp</item>
+    </style>
 </resources>

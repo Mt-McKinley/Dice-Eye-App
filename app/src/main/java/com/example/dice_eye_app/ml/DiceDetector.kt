@@ -10,6 +10,8 @@ import com.example.dice_eye_app.util.DebugBitmap
 import com.example.dice_eye_app.util.DebugConfig
 import org.tensorflow.lite.DataType
 import org.tensorflow.lite.Interpreter
+import org.tensorflow.lite.gpu.CompatibilityList
+import org.tensorflow.lite.gpu.GpuDelegate
 import java.io.FileInputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -37,7 +39,7 @@ class DiceDetector(private val context: Context) {
         const val NUM_THREADS = 4
 
         // Detection thresholds, tuned for a balance of precision and recall.
-        const val CONFIDENCE_THRESHOLD = 0.15f // Lowered to detect more dice (was 0.25)
+        const val CONFIDENCE_THRESHOLD = 0.20f // Optimized threshold (was 0.15)
         const val IOU_THRESHOLD = 0.45f        // Threshold for non-maximum suppression (NMS).
 
         // Sanity filters for bounding boxes to eliminate obvious false positives.
@@ -49,9 +51,14 @@ class DiceDetector(private val context: Context) {
 
         // The maximum number of dice to return after all filtering and NMS.
         const val MAX_FINAL_DETECTIONS = 12
+        
+        // Hardware acceleration
+        const val USE_GPU = false               // Temporarily disabled for debugging
+        const val USE_NNAPI = false            // Keep NNAPI disabled for consistency
     }
 
     private var interpreter: Interpreter? = null
+    private var gpuDelegate: GpuDelegate? = null
     private var modelLoaded = false
 
     // Model properties, auto-detected from the TFLite model file upon loading.
@@ -69,7 +76,9 @@ class DiceDetector(private val context: Context) {
     private var lastPadY: Float = 0f
 
     init {
+        Log.d(TAG, "DiceDetector initializing...")
         loadModel()
+        Log.d(TAG, "DiceDetector initialization complete")
     }
 
     /**
@@ -113,14 +122,46 @@ class DiceDetector(private val context: Context) {
      * Loads the TFLite model from assets and initializes the interpreter.
      */
     private fun loadModel() {
+        Log.d(TAG, "loadModel() starting...")
         try {
+            Log.d(TAG, "Loading model file: ${Config.MODEL_FILENAME}")
             val modelBuffer = loadModelFile(context, Config.MODEL_FILENAME)
+            Log.d(TAG, "Model file loaded successfully, creating interpreter options...")
             val options = Interpreter.Options().apply {
                 numThreads = Config.NUM_THREADS
-                // Disabling NNAPI can provide more consistent performance across devices.
-                setUseNNAPI(false)
+                Log.d(TAG, "Set numThreads to ${Config.NUM_THREADS}")
+                
+                // Try to use GPU acceleration if available and enabled
+                if (Config.USE_GPU) {
+                    Log.d(TAG, "GPU enabled in config, checking compatibility...")
+                    try {
+                        val compatList = CompatibilityList()
+                        if (compatList.isDelegateSupportedOnThisDevice) {
+                            try {
+                                gpuDelegate = GpuDelegate()
+                                addDelegate(gpuDelegate)
+                                Log.i(TAG, "GPU delegate enabled for acceleration")
+                            } catch (e: Exception) {
+                                Log.w(TAG, "GPU delegate creation failed, falling back to CPU", e)
+                                gpuDelegate = null
+                            }
+                        } else {
+                            Log.i(TAG, "GPU delegate not supported on this device")
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "GPU compatibility check failed, using CPU", e)
+                    }
+                } else {
+                    Log.d(TAG, "GPU disabled in config")
+                }
+                
+                // NNAPI setting
+                setUseNNAPI(Config.USE_NNAPI)
+                Log.d(TAG, "Set NNAPI to ${Config.USE_NNAPI}")
             }
+            Log.d(TAG, "Creating interpreter...")
             interpreter = Interpreter(modelBuffer, options)
+            Log.d(TAG, "Interpreter created successfully")
 
             // Inspect the loaded model to determine its input/output shapes and types.
             inspectModel()
@@ -130,6 +171,7 @@ class DiceDetector(private val context: Context) {
         } catch (e: Exception) {
             modelLoaded = false
             Log.e(TAG, "Failed to load dice detection model.", e)
+            throw e  // Re-throw to see the crash
         }
     }
 
@@ -782,6 +824,8 @@ class DiceDetector(private val context: Context) {
      * Closes the TFLite interpreter to release resources.
      */
     fun close() {
+        gpuDelegate?.close()
+        gpuDelegate = null
         interpreter?.close()
         interpreter = null
         Log.i(TAG, "DiceDetector closed.")

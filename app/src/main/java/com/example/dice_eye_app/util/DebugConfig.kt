@@ -5,19 +5,19 @@ package com.example.dice_eye_app.util
  */
 object DebugConfig {
     // Master switch to enable/disable all debug features
-    const val ENABLED = true
+    const val ENABLED = false // Disabled for production speed
 
     // Save various intermediate processing images
-    const val SAVE_ORIGINAL = true          // Save original captured image after rotation
-    const val SAVE_LETTERBOXED = true       // Save letterboxed input to detector
-    const val SAVE_DETECTIONS_OVERLAY = true // Save overlay showing all initial detections
-    const val SAVE_CROPS = true             // Save cropped die images sent to classifier
+    const val SAVE_ORIGINAL = false          // Save original captured image after rotation
+    const val SAVE_LETTERBOXED = false       // Save letterboxed input to detector
+    const val SAVE_DETECTIONS_OVERLAY = false // Save overlay showing all initial detections
+    const val SAVE_CROPS = false             // Save cropped die images sent to classifier
     const val SAVE_ROTATED_VARIANTS = false // Disabled - we're not using TTA anymore
-    const val SAVE_FINAL_OVERLAY = true     // Save final labeled result overlay
+    const val SAVE_FINAL_OVERLAY = false     // Save final labeled result overlay
 
     // Debug logging
-    const val LOG_CLASSIFIER_DETAILS = true // Log detailed classification probabilities
-    const val LOG_ALL_DETECTIONS = true     // Log all detections before filtering
+    const val LOG_CLASSIFIER_DETAILS = false // Log detailed classification probabilities
+    const val LOG_ALL_DETECTIONS = false     // Log all detections before filtering
 
     // Mapping diagnostics
     // If true, bypasses ClassMapping so the app uses raw class ids (0..5) directly.

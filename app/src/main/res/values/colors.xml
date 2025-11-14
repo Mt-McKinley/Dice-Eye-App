@@ -1,5 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- Dice Eye Brand Colors -->
+    <color name="dice_eye_cyan">#00D4FF</color>
+    <color name="dice_eye_cyan_light">#66E5FF</color>
+    <color name="dice_eye_dark_blue">#1E3A4F</color>
+    <color name="dice_eye_navy">#2A4A5E</color>
+    <color name="dice_eye_background">#0F1F2B</color>
+    
+    <!-- Legacy colors (kept for compatibility) -->
     <color name="purple_200">#FFBB86FC</color>
     <color name="purple_500">#FF6200EE</color>
     <color name="purple_700">#FF3700B3</color>

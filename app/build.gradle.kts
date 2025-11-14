@@ -91,6 +91,9 @@ dependencies {
     // Material Icons Extended (using older version without TensorFlow Lite conflicts)
     implementation("androidx.compose.material:material-icons-extended:1.6.8")
 
+    // Splash Screen API
+    implementation("androidx.core:core-splashscreen:1.0.1")
+
     // Navigation
     implementation(libs.androidx.navigation.compose)
 
@@ -110,6 +113,9 @@ dependencies {
     // TensorFlow Lite for ML model inference - use version catalog
     implementation(libs.tensorflow.lite)
     implementation(libs.tensorflow.lite.support)
+    
+    // TensorFlow Lite GPU delegate for hardware acceleration
+    implementation("org.tensorflow:tensorflow-lite-gpu:2.13.0")
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)

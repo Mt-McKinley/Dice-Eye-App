@@ -1,7 +1,10 @@
 package com.example.dice_eye_app.camera
 
 import android.content.Context
+import android.view.MotionEvent
+import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -19,6 +22,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import com.google.common.util.concurrent.ListenableFuture
 import java.util.concurrent.Executor
+import java.util.concurrent.TimeUnit
 
 /**
  * A simplified camera preview that works with the stable versions of CameraX
@@ -53,6 +57,9 @@ fun CameraPreview(
                 implementationMode = PreviewView.ImplementationMode.COMPATIBLE
             }
 
+            // Variable to hold the camera reference for focus control
+            var camera: Camera? = null
+
             // Setup the camera provider
             val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
             cameraProviderFuture.addListener({
@@ -64,12 +71,29 @@ fun CameraPreview(
 
                     // Bind use cases to camera
                     preview.setSurfaceProvider(previewView.surfaceProvider)
-                    cameraProvider.bindToLifecycle(
+                    camera = cameraProvider.bindToLifecycle(
                         lifecycleOwner,
                         cameraSelector,
                         preview,
                         imageCapture
                     )
+                    
+                    // Setup tap-to-focus
+                    previewView.setOnTouchListener { view, event ->
+                        if (event.action == MotionEvent.ACTION_DOWN) {
+                            camera?.let { cam ->
+                                val factory = previewView.meteringPointFactory
+                                val point = factory.createPoint(event.x, event.y)
+                                val action = FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF)
+                                    .setAutoCancelDuration(3, TimeUnit.SECONDS)
+                                    .build()
+                                cam.cameraControl.startFocusAndMetering(action)
+                            }
+                            true
+                        } else {
+                            false
+                        }
+                    }
                 } catch (e: Exception) {
                     e.printStackTrace()
                 }
